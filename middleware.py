@@ -1,49 +1,71 @@
 import asyncio
-import json
-import os
-from aiohttp import web
-from pyModbusTCP.client import ModbusClient
-from iec104 import IEC104Server  # Псевдокод, потрібно реалізувати IEC 104 сервер
-import threading
+import sqlite3
+from fastapi import FastAPI
+from pymodbus.client.sync import ModbusTcpClient
+from iec104 import IEC104Server
 
-# Завантаження конфігурації
-def load_config():
-    config_path = os.getenv("CONFIG_PATH", "config.json")
-    with open(config_path, "r") as f:
-        return json.load(f)
+app = FastAPI()
 
-config = load_config()
+db_path = "config.db"
 
-# Підключення до Modbus
-modbus_client = ModbusClient(host=config["modbus_ip"], port=config["modbus_port"], auto_open=True)
+def init_db():
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS sensors (
+                        id INTEGER PRIMARY KEY,
+                        ip TEXT,
+                        port INTEGER,
+                        register INTEGER,
+                        scale REAL
+                    )''')
+    conn.commit()
+    conn.close()
 
-# Читання даних із датчиків
+init_db()
+
+def get_sensors():
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT ip, port, register, scale FROM sensors")
+    sensors = cursor.fetchall()
+    conn.close()
+    return sensors
+
 def read_modbus_data():
     data = {}
-    for sensor in config["sensors"]:
-        value = modbus_client.read_holding_registers(sensor["register"], 1)
-        if value:
-            data[sensor["name"]] = value[0] * sensor["scale"]
+    for ip, port, register, scale in get_sensors():
+        client = ModbusTcpClient(ip, port)
+        client.connect()
+        rr = client.read_holding_registers(register, 1)
+        if rr.isError():
+            continue
+        value = rr.registers[0] * scale
+        data[f"{ip}:{register}"] = value
+        client.close()
     return data
 
-# Обробка запиту від GUI
-async def handle_gui_request(request):
-    return web.json_response(read_modbus_data())
+iec104_server = IEC104Server()
 
-# Запуск веб-сервера
-def start_web_server():
-    app = web.Application()
-    app.add_routes([web.get("/data", handle_gui_request)])
-    web.run_app(app, port=8080)
+@app.get("/send_iec104")
+def send_iec104_data():
+    data = read_modbus_data()
+    for key, value in data.items():
+        iec104_server.send_data(value)
+    return {"status": "data sent"}
 
-# Запуск IEC 104 сервера (потрібно реалізувати окремо)
-def start_iec_server():
-    iec_server = IEC104Server()
-    iec_server.start()
+@app.get("/config")
+def get_config():
+    return {"sensors": get_sensors()}
 
-# Запуск всіх сервісів у потоках
+@app.post("/config")
+def add_sensor(ip: str, port: int, register: int, scale: float):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO sensors (ip, port, register, scale) VALUES (?, ?, ?, ?)", (ip, port, register, scale))
+    conn.commit()
+    conn.close()
+    return {"status": "added"}
+
 if __name__ == "__main__":
-    threading.Thread(target=start_web_server, daemon=True).start()
-    threading.Thread(target=start_iec_server, daemon=True).start()
-    while True:
-        asyncio.sleep(1)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

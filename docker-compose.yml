@@ -1,0 +1,10 @@
+version: '3.8'
+services:
+  python-backend:
+    container_name: python-backend
+    build: .
+    ports:
+      - "8080:8080"  # Відкриваємо порт 8080 для доступу до API
+    volumes:
+      - ./config.json:/app/config.json  # Монтируем файл конфигурации
+    restart: always
